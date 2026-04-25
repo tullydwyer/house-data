@@ -7,6 +7,7 @@ The extension runs without hosted infrastructure. It stores campaign history and
 ## Features
 
 - On-page insight panel for property listing pages.
+- Search-result scraping on supported portal list pages, with parsed filters, a summary table, and per-card badges.
 - Visible price, detected guide/range, search range, status, agent, agency, rent, and estimated gross yield where available.
 - Local campaign timeline that records changes seen by your browser.
 - Local notes per listing for inspection notes, auction results, strata details, or agent comments.

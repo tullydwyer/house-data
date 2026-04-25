@@ -17,6 +17,17 @@
     const run = debounce(async () => {
       const listing = collectListing();
       if (!listing) {
+        const results = collectSearchResults();
+        if (results.length) {
+          await saveSearchResults(results);
+          injectSearchPanel(results);
+          results.forEach(annotateSearchCard);
+          results.slice(0, 25).forEach((result) => {
+            chrome.runtime.sendMessage({ type: "HOUSE_LENS_SYNC_SNAPSHOT", payload: result });
+          });
+          return;
+        }
+
         annotateSearchCards();
         return;
       }
@@ -45,6 +56,7 @@
   function collectListing() {
     const portal = getPortal();
     if (!portal) return null;
+    if (isSearchResultsPath()) return null;
 
     const title = cleanText(
       pickText([
@@ -239,6 +251,9 @@
   }
 
   function getSearchRangeFromUrl() {
+    const filters = parseSearchFilters();
+    if (filters.priceRange) return filters.priceRange;
+
     const params = new URLSearchParams(location.search);
     const min = firstParam(params, ["price-min", "priceMin", "minPrice", "priceFrom", "min"]);
     const max = firstParam(params, ["price-max", "priceMax", "maxPrice", "priceTo", "max"]);
@@ -255,6 +270,58 @@
       if (value) return value;
     }
     return "";
+  }
+
+  function parseSearchFilters() {
+    const path = decodeURIComponent(location.pathname).toLowerCase();
+    const params = new URLSearchParams(location.search);
+    const filters = {
+      mode: path.match(/^\/(buy|rent|sold)\//)?.[1] || "",
+      page: Number(path.match(/\/list-(\d+)\/?$/)?.[1] || 0) || "",
+      location: cleanText(path.match(/-in-([^/]+)\/list-\d+/)?.[1]?.replace(/-/g, " ") || ""),
+      source: params.get("source") || "",
+      sourcePage: params.get("sourcePage") || "",
+      sourceElement: params.get("sourceElement") || ""
+    };
+
+    const exactBeds = Number(path.match(/with-(\d+)-bedrooms?/)?.[1] || 0) || "";
+    const minBeds = Number(params.get("minBeds") || path.match(/with-(\d+)-plus-bedrooms?/)?.[1] || 0) || "";
+    const maxBeds = Number(params.get("maxBeds") || 0) || exactBeds || "";
+    if (exactBeds) filters.beds = exactBeds;
+    if (minBeds) filters.minBeds = minBeds;
+    if (maxBeds) filters.maxBeds = maxBeds;
+
+    const pathPrice = path.match(/between-(\d+)-(\d+)/);
+    const queryMinPrice = firstParam(params, ["price-min", "priceMin", "minPrice", "priceFrom", "min"]);
+    const queryMaxPrice = firstParam(params, ["price-max", "priceMax", "maxPrice", "priceTo", "max"]);
+    const minPrice = Number(pathPrice?.[1] || queryMinPrice || 0) || 0;
+    const maxPrice = Number(pathPrice?.[2] || queryMaxPrice || 0) || 0;
+    if (minPrice) filters.minPrice = minPrice;
+    if (maxPrice) filters.maxPrice = maxPrice;
+    if (minPrice || maxPrice) filters.priceRange = formatRange(minPrice, maxPrice);
+
+    const firstPathPart = path.split("/")[2] || "";
+    const propertyType = firstPathPart.split(/-with-|-between-|-in-/)[0];
+    if (
+      propertyType &&
+      !["property", "properties"].includes(propertyType) &&
+      !/^(with|between|in|list-\d+)/.test(propertyType)
+    ) {
+      filters.propertyType = cleanText(propertyType.replace(/-/g, " "));
+    }
+
+    return Object.fromEntries(Object.entries(filters).filter(([, value]) => value !== "" && value !== null));
+  }
+
+  function summarizeSearchFilters(filters) {
+    return [
+      filters.mode,
+      filters.location && filters.location.toUpperCase(),
+      filters.priceRange,
+      filters.beds && `${filters.beds} beds`,
+      !filters.beds && filters.maxBeds && `up to ${filters.maxBeds} beds`,
+      filters.propertyType
+    ].filter(Boolean).join(" | ");
   }
 
   function findJsonSignals() {
@@ -542,6 +609,127 @@
     });
   }
 
+  function collectSearchResults() {
+    if (!isSearchResultsPath()) return [];
+
+    const portal = getPortal();
+    const searchFilters = parseSearchFilters();
+    const searchRange = searchFilters.priceRange || getSearchRangeFromUrl();
+    const seen = new Set();
+    const now = new Date().toISOString();
+    const results = [];
+
+    for (const anchor of querySelectorAllSafe("a[href*='/property-']")) {
+      const url = normalizeListingUrl(anchor.href);
+      if (!url || seen.has(url)) continue;
+
+      const listingId = getListingIdFromUrl(url);
+      if (!listingId) continue;
+
+      const card = findSearchCard(anchor);
+      const title = cleanText(anchor.textContent) || cleanText(anchor.querySelector("img")?.alt);
+      const cardText = cleanText(card?.textContent || anchor.textContent);
+      const displayedPrice = extractSearchPrice(cardText);
+      const status = extractSearchStatus(cardText);
+      const propertyType = extractPropertyType(cardText);
+      const features = extractFeatures(cardText, propertyType);
+
+      seen.add(url);
+      results.push({
+        id: `${portal}:${listingId}`,
+        portal,
+        url,
+        listingId,
+        title,
+        address: title,
+        displayedPrice,
+        hiddenRange: normalizeMoneyText(displayedPrice),
+        searchRange,
+        searchFilters,
+        status,
+        agent: extractAgent(cardText, title),
+        agency: extractAgency(cardText),
+        rent: "",
+        estimate: "",
+        propertyType,
+        beds: features.beds,
+        baths: features.baths,
+        cars: features.cars,
+        landSize: features.landSize,
+        firstSeenAt: now,
+        seenAt: now,
+        sourceSearchUrl: location.href,
+        signals: []
+      });
+    }
+
+    return results.slice(0, 80);
+  }
+
+  async function saveSearchResults(results) {
+    for (const result of results) {
+      await saveSnapshot(result);
+    }
+  }
+
+  function injectSearchPanel(results) {
+    document.querySelector(`#${ROOT_ID}`)?.remove();
+
+    const root = document.createElement("section");
+    root.id = ROOT_ID;
+    root.innerHTML = renderSearchPanel(results);
+
+    const anchor = querySelectorSafe("h1") || querySelectorSafe("main") || document.body.firstElementChild;
+    if (anchor?.parentElement) {
+      anchor.parentElement.insertBefore(root, anchor.nextSibling);
+    } else {
+      document.body.prepend(root);
+    }
+  }
+
+  function renderSearchPanel(results) {
+    const filters = results[0]?.searchFilters || parseSearchFilters();
+    const withPrice = results.filter((result) => result.displayedPrice).length;
+    const contactAgent = results.filter((result) => /contact agent|expressions of interest|auction/i.test(result.displayedPrice || result.status)).length;
+    const filterSummary = summarizeSearchFilters(filters);
+    const rows = results.slice(0, 25).map((result) => `
+      <tr>
+        <td><a href="${escapeHtml(result.url)}">${escapeHtml(result.title || result.listingId)}</a></td>
+        <td>${escapeHtml(result.displayedPrice || result.status || "Not shown")}</td>
+        <td>${escapeHtml([result.beds && `${result.beds} bed`, result.propertyType, result.landSize].filter(Boolean).join(" | "))}</td>
+      </tr>
+    `).join("");
+
+    return `
+      <div class="hl-panel hl-search-panel">
+        <div class="hl-header">
+          <div class="hl-brand">
+            <div class="hl-mark">HL</div>
+            <div>
+              <h2 class="hl-title">House Lens search scrape</h2>
+              <p class="hl-subtitle">${escapeHtml(document.title || "Search results")}</p>
+            </div>
+          </div>
+          <span class="hl-chip">${results.length} found</span>
+        </div>
+        <div class="hl-view" data-active="true">
+          <div class="hl-grid">
+            ${metric("Listings scraped", String(results.length), "Saved to local campaign history from this search page.")}
+            ${metric("Prices found", String(withPrice), "Visible price text detected on result cards.")}
+            ${metric("Agent hidden", String(contactAgent), "Auction, contact-agent, and EOI style cards.")}
+            ${metric("Filters", filterSummary || "Not detected", "Parsed from the current REA search path and query string.")}
+          </div>
+          <table class="hl-results">
+            <thead>
+              <tr><th>Listing</th><th>Price</th><th>Details</th></tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  }
+
   function annotateSearchCards() {
     if (!/\/sale|\/buy|\/rent|\/sold|search/i.test(location.pathname)) return;
 
@@ -561,6 +749,113 @@
     });
   }
 
+  function annotateSearchCard(result) {
+    const anchor = querySelectorSafe(`a[href*='${cssEscape(result.listingId)}']`);
+    const card = anchor && findSearchCard(anchor);
+    if (!card || card.querySelector(".hl-badge")) return;
+
+    const badge = document.createElement("div");
+    badge.className = "hl-badge";
+    badge.textContent = `House Lens: ${result.displayedPrice || result.status || "saved"}`;
+    anchor.parentElement?.insertBefore(badge, anchor.nextSibling);
+  }
+
+  function findSearchCard(anchor) {
+    const preferred = anchor.closest("article, li, [data-testid*='listing-card']");
+    if (preferred) return preferred;
+
+    let node = anchor.parentElement;
+    for (let depth = 0; node && depth < 8; depth += 1) {
+      const text = cleanText(node.textContent);
+      if (text.length > 80 && text.length < 2500 && looksLikeResultCardText(text)) return node;
+      node = node.parentElement;
+    }
+
+    return anchor.parentElement;
+  }
+
+  function looksLikeResultCardText(text) {
+    return /\b(house|unit|apartment|townhouse|land|villa|acreage|duplex|retirement living|mixed farming)\b/i.test(text) ||
+      looksLikePriceText(text);
+  }
+
+  function normalizeListingUrl(value) {
+    try {
+      const url = new URL(value, location.href);
+      if (!url.hostname.includes("realestate.com.au") && !url.hostname.includes("domain.com.au") && !url.hostname.includes("allhomes.com.au")) {
+        return "";
+      }
+      if (!/\/property-/i.test(url.pathname)) return "";
+      url.search = "";
+      url.hash = "";
+      return url.href;
+    } catch {
+      return "";
+    }
+  }
+
+  function getListingIdFromUrl(value) {
+    try {
+      const url = new URL(value, location.href);
+      return url.pathname.match(/-(\d{5,})(?:\/)?$/)?.[1] || "";
+    } catch {
+      return "";
+    }
+  }
+
+  function extractSearchPrice(text) {
+    const patterns = [
+      /price guide\s*(?:around\s*)?\$?[\d,.]+\s*(?:million|mil|m|k)?(?:\s*(?:-|to)\s*\$?[\d,.]+\s*(?:million|mil|m|k)?)?/i,
+      /offers?\s+(?:over|above|from)\s+\$?[\d,.]+\s*(?:million|mil|m|k)?/i,
+      /from\s+\$?[\d,.]+\s*(?:million|mil|m|k)?(?:\s*-\s*\$?[\d,.]+\s*(?:million|mil|m|k)?)?/i,
+      /\$[\d,.]+\s*(?:million|mil|m|k)?(?:\s*(?:-|to)\s*\$?[\d,.]+\s*(?:million|mil|m|k)?)?/i,
+      /\b(?:auction|contact agent|expressions of interest|under contract|under offer|for sale)\b/i
+    ];
+
+    for (const pattern of patterns) {
+      const match = text.match(pattern);
+      if (match) return cleanText(match[0]);
+    }
+
+    return "";
+  }
+
+  function extractSearchStatus(text) {
+    return cleanText(text.match(/\b(auction|under offer|under contract|sold|new|just listed|contact agent|expressions of interest)\b/i)?.[0] || "");
+  }
+
+  function extractPropertyType(text) {
+    return cleanText(text.match(/\b(House|Unit|Apartment|Townhouse|Residential land|Land|Villa|Acreage|Duplex|Retirement living|Mixed farming)\b/i)?.[0] || "");
+  }
+
+  function extractFeatures(text, propertyType) {
+    const type = propertyType ? escapeRegExp(propertyType) : "(?:House|Unit|Apartment|Townhouse|Residential land|Land|Villa|Acreage|Duplex|Retirement living|Mixed farming)";
+    const match = text.match(new RegExp(`((?:\\b\\d+\\b\\s+){0,3}(?:[\\d,.]+\\s*(?:m²|sqm|ha)\\s*)?)•\\s*${type}`, "i"));
+    const featureText = cleanText(match?.[1] || "");
+    const landSize = cleanText(featureText.match(/[\d,.]+\s*(?:m²|sqm|ha)/i)?.[0] || "");
+    const counts = featureText
+      .replace(/[\d,.]+\s*(?:m²|sqm|ha)/gi, "")
+      .match(/\b\d+\b/g) || [];
+
+    return {
+      beds: counts[0] || "",
+      baths: counts[1] || "",
+      cars: counts[2] || "",
+      landSize
+    };
+  }
+
+  function extractAgent(text, title) {
+    const beforeTitle = title ? text.split(title)[0] : text;
+    const candidates = beforeTitle.match(/\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2}\b/g) || [];
+    return cleanText(candidates.find((candidate) => !/Menu|Buy|Rent|Sold|Image|Video|Property|QLD|NSW|VIC|ACT|TAS|WA|SA|NT/i.test(candidate)) || "");
+  }
+
+  function extractAgency(text) {
+    const match = text.match(/\b(?:Ray White|Harcourts|Belle Property|Elders|REMAX|Image Property|NGU Real Estate|LJ Hooker|McGrath|Place|Coronis|First National|Professionals|PRD|Barry Plant|Jellis Craig)[^A-Z]{0,2}[A-Za-z\s&.-]{0,45}/i);
+    return cleanText(match?.[0] || "");
+  }
+
   function looksLikePriceText(text) {
     if (!text || text.length > 140) return false;
     return /\$[\d,.]+|contact agent|price on request|auction|expressions of interest|offers/i.test(text);
@@ -568,6 +863,10 @@
 
   function isPropertyListingPath() {
     return /^\/property-[a-z0-9+%-]+-\d{5,}\/?$/i.test(location.pathname);
+  }
+
+  function isSearchResultsPath() {
+    return /^\/(?:buy|rent|sold)\//i.test(location.pathname) && /\/list-\d+\/?$/i.test(location.pathname);
   }
 
   function findVisibleElement(predicate) {
@@ -715,6 +1014,15 @@
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#039;");
+  }
+
+  function escapeRegExp(value) {
+    return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  function cssEscape(value) {
+    if (window.CSS?.escape) return CSS.escape(String(value));
+    return String(value).replace(/['"\\]/g, "\\$&");
   }
 
   function hashString(value) {

@@ -196,6 +196,38 @@
   color: #607064;
 }
 
+.hl-search-panel {
+  margin-bottom: 18px;
+}
+
+.hl-results {
+  width: 100%;
+  margin-top: 14px;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.hl-results th,
+.hl-results td {
+  padding: 9px 8px;
+  border-top: 1px solid #e1e9e4;
+  text-align: left;
+  vertical-align: top;
+}
+
+.hl-results th {
+  color: #405146;
+  background: #f6faf7;
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.hl-results a {
+  color: #115239;
+  font-weight: 800;
+  text-decoration: none;
+}
+
 .hl-badge {
   position: relative;
   z-index: 2;
