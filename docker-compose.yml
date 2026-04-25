@@ -1,0 +1,13 @@
+services:
+  house-lens-api:
+    build: ./backend
+    ports:
+      - "8787:8787"
+    environment:
+      DATA_DIR: /data
+    volumes:
+      - house-lens-data:/data
+    restart: unless-stopped
+
+volumes:
+  house-lens-data:

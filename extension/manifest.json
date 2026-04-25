@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "House Lens",
+  "description": "Adds property price, campaign history, local notes, and buyer-focused insights to Australian property listings.",
+  "version": "0.1.0",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://*.domain.com.au/*",
+    "https://*.realestate.com.au/*",
+    "https://*.allhomes.com.au/*",
+    "http://localhost:8787/*"
+  ],
+  "action": {
+    "default_title": "House Lens",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "src/background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.domain.com.au/*",
+        "https://*.realestate.com.au/*",
+        "https://*.allhomes.com.au/*"
+      ],
+      "js": ["src/content.js"],
+      "css": ["src/content.css"],
+      "run_at": "document_idle"
+    }
+  ]
+}

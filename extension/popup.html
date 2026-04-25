@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>House Lens</title>
+    <link rel="stylesheet" href="src/popup.css">
+  </head>
+  <body>
+    <main>
+      <header>
+        <div class="mark">HL</div>
+        <div>
+          <h1>House Lens</h1>
+          <p>Property insight overlay</p>
+        </div>
+      </header>
+
+      <label class="toggle">
+        <input id="overlayEnabled" type="checkbox">
+        <span>Show overlay on listings</span>
+      </label>
+
+      <label class="toggle">
+        <input id="apiEnabled" type="checkbox">
+        <span>Sync snapshots to API</span>
+      </label>
+
+      <label class="field">
+        <span>API base URL</span>
+        <input id="apiBaseUrl" type="url" placeholder="http://localhost:8787">
+      </label>
+
+      <button id="save">Save</button>
+      <p id="status" role="status"></p>
+    </main>
+    <script src="src/popup.js"></script>
+  </body>
+</html>
