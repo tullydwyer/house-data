@@ -205,7 +205,7 @@
   }
 
   function findStatus() {
-    const text = findVisibleText((value) => /\b(auction|sold|under offer|for sale|private sale|passed in|withdrawn)\b/i.test(value));
+    const text = findVisibleText((value) => isListingStatusText(value));
     return cleanText(text);
   }
 
@@ -440,7 +440,7 @@
     const store = await storageGet(STORE_KEY, {});
     const existing = store[listing.id] || { firstSeenAt: listing.seenAt, snapshots: [], note: "" };
     const previous = existing.snapshots[existing.snapshots.length - 1];
-    const snapshot = {
+    const snapshot = normalizeSnapshot({
       seenAt: listing.seenAt,
       displayedPrice: listing.displayedPrice,
       hiddenRange: listing.hiddenRange,
@@ -449,14 +449,11 @@
       agent: listing.agent,
       agency: listing.agency,
       url: listing.url
-    };
+    });
 
     const changed =
       !previous ||
-      previous.displayedPrice !== snapshot.displayedPrice ||
-      previous.hiddenRange !== snapshot.hiddenRange ||
-      previous.status !== snapshot.status ||
-      previous.agent !== snapshot.agent;
+      hasSnapshotChanged(previous, snapshot);
 
     const snapshots = changed
       ? [...existing.snapshots, snapshot].slice(-MAX_STORED_SNAPSHOTS)
@@ -566,23 +563,77 @@
 
   function renderTimeline(snapshots) {
     if (!snapshots?.length) return `<p class="hl-empty">No local history yet.</p>`;
-    const items = [...snapshots].reverse().map((snapshot) => {
-      const bits = [
-        snapshot.displayedPrice && `displayed ${snapshot.displayedPrice}`,
-        snapshot.hiddenRange && `guide ${snapshot.hiddenRange}`,
-        snapshot.status && snapshot.status,
-        snapshot.agent && `agent ${snapshot.agent}`
-      ].filter(Boolean);
+    const changes = buildTimelineChanges(snapshots);
+    if (!changes.length) return `<p class="hl-empty">No changes recorded yet.</p>`;
 
+    const items = changes.reverse().map((change) => {
       return `
         <li>
-          <div class="hl-time">${escapeHtml(formatDate(snapshot.seenAt))}</div>
-          <div>${escapeHtml(bits.join(" | ") || "Listing observed")}</div>
+          <div class="hl-time">${escapeHtml(formatDate(change.seenAt))}</div>
+          <div>${escapeHtml(change.description)}</div>
         </li>
       `;
     }).join("");
 
     return `<ul class="hl-timeline">${items}</ul>`;
+  }
+
+  function buildTimelineChanges(snapshots) {
+    const normalized = collapseSnapshotsForTimeline(snapshots.map(normalizeSnapshot));
+    const changes = [];
+
+    for (let index = 1; index < normalized.length; index += 1) {
+      const previous = normalized[index - 1];
+      const current = normalized[index];
+      const descriptions = describeSnapshotChanges(previous, current);
+      if (descriptions.length) {
+        changes.push({
+          seenAt: current.seenAt,
+          description: descriptions.join(" | ")
+        });
+      }
+    }
+
+    return changes;
+  }
+
+  function collapseSnapshotsForTimeline(snapshots) {
+    const buckets = new Map();
+    for (const snapshot of snapshots) {
+      buckets.set(timelineBucket(snapshot.seenAt), snapshot);
+    }
+    return [...buckets.values()];
+  }
+
+  function timelineBucket(value) {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value || "");
+    date.setSeconds(0, 0);
+    return date.toISOString();
+  }
+
+  function describeSnapshotChanges(previous, current) {
+    return [
+      describeFieldChange("displayed", previous.displayedPrice, current.displayedPrice),
+      describeFieldChange("guide", previous.hiddenRange, current.hiddenRange),
+      describeFieldChange("status", previous.status, current.status),
+      describeFieldChange("agent", previous.agent, current.agent),
+      describeFieldChange("agency", previous.agency, current.agency)
+    ].filter(Boolean);
+  }
+
+  function describeFieldChange(label, before, after) {
+    if ((before || "") === (after || "")) return "";
+    if (label === "agent" && before && after && namesEquivalent(before, after)) return "";
+    if (!before && after) return `${label} added: ${after}`;
+    if (before && !after) return "";
+    return `${label}: ${before} -> ${after}`;
+  }
+
+  function namesEquivalent(left, right) {
+    const a = cleanText(left).toLowerCase();
+    const b = cleanText(right).toLowerCase();
+    return a.includes(b) || b.includes(a);
   }
 
   function wirePanel(root, listingId) {
@@ -804,24 +855,25 @@
   }
 
   function extractSearchPrice(text) {
+    const money = String.raw`\$?(?:\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)(?:\s*(?:million|mil|m|k))?`;
     const patterns = [
-      /price guide\s*(?:around\s*)?\$?[\d,.]+\s*(?:million|mil|m|k)?(?:\s*(?:-|to)\s*\$?[\d,.]+\s*(?:million|mil|m|k)?)?/i,
-      /offers?\s+(?:over|above|from)\s+\$?[\d,.]+\s*(?:million|mil|m|k)?/i,
-      /from\s+\$?[\d,.]+\s*(?:million|mil|m|k)?(?:\s*-\s*\$?[\d,.]+\s*(?:million|mil|m|k)?)?/i,
-      /\$[\d,.]+\s*(?:million|mil|m|k)?(?:\s*(?:-|to)\s*\$?[\d,.]+\s*(?:million|mil|m|k)?)?/i,
+      new RegExp(String.raw`price guide\s*(?:around\s*)?${money}(?:\s*(?:-|to)\s*${money})?`, "i"),
+      new RegExp(String.raw`offers?\s+(?:over|above|from)\s+${money}`, "i"),
+      new RegExp(String.raw`from\s+${money}(?:\s*-\s*${money})?`, "i"),
+      new RegExp(String.raw`\$?(?:\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)(?:\s*(?:million|mil|m|k))?(?:\s*(?:-|to)\s*${money})?`, "i"),
       /\b(?:auction|contact agent|expressions of interest|under contract|under offer|for sale)\b/i
     ];
 
     for (const pattern of patterns) {
       const match = text.match(pattern);
-      if (match) return cleanText(match[0]);
+      if (match) return cleanPriceText(match[0]);
     }
 
     return "";
   }
 
   function extractSearchStatus(text) {
-    return cleanText(text.match(/\b(auction|under offer|under contract|sold|new|just listed|contact agent|expressions of interest)\b/i)?.[0] || "");
+    return cleanText(text.match(/\b(auction|under offer|under contract|new|just listed|contact agent|expressions of interest)\b/i)?.[0] || "");
   }
 
   function extractPropertyType(text) {
@@ -861,6 +913,16 @@
     return /\$[\d,.]+|contact agent|price on request|auction|expressions of interest|offers/i.test(text);
   }
 
+  function isListingStatusText(text) {
+    const value = cleanText(text);
+    if (!value || value.length > 80) return false;
+    if (/^(buy|rent|sold|share|save|menu|news|map|list|filters?)$/i.test(value)) return false;
+    if (/\b(under offer|under contract|private sale|passed in|withdrawn)\b/i.test(value)) return true;
+    if (/\bauction\b/i.test(value)) return true;
+    if (/\bsold\b/i.test(value)) return /\b(sold by|sold for|sold on|recently sold|property sold)\b/i.test(value);
+    return false;
+  }
+
   function isPropertyListingPath() {
     return /^\/property-[a-z0-9+%-]+-\d{5,}\/?$/i.test(location.pathname);
   }
@@ -885,6 +947,56 @@
 
   function cleanText(value) {
     return String(value || "").replace(/\s+/g, " ").trim();
+  }
+
+  function cleanPriceText(value) {
+    return cleanText(value)
+      .replace(/(\$\d{1,3}(?:,\d{3})+)\d+\b/g, "$1")
+      .replace(/\$(\d[\d,]*)(\d{1,3})(?=\s*[A-Z][a-z])/g, "$$$1")
+      .replace(/(\d)(?=[A-Z][a-z])/g, "$1 ")
+      .trim();
+  }
+
+  function normalizeSnapshot(snapshot) {
+    return {
+      ...snapshot,
+      displayedPrice: cleanPriceText(snapshot.displayedPrice || ""),
+      hiddenRange: normalizeSnapshotGuide(snapshot.hiddenRange || "", snapshot.displayedPrice || ""),
+      searchRange: normalizeSnapshotGuide(snapshot.searchRange || "", ""),
+      status: normalizeSnapshotStatus(snapshot.status || ""),
+      agent: normalizePersonName(snapshot.agent || ""),
+      agency: cleanText(snapshot.agency || "")
+    };
+  }
+
+  function normalizeSnapshotGuide(guide, displayedPrice) {
+    const cleaned = cleanPriceText(guide);
+    const displayed = cleanPriceText(displayedPrice);
+    if (!cleaned || cleaned === displayed) return "";
+    const guideNumber = averageRange(cleaned);
+    const displayedNumber = averageRange(displayed);
+    if (guideNumber && displayedNumber && guideNumber > displayedNumber * 5) return "";
+    return cleaned;
+  }
+
+  function normalizeSnapshotStatus(status) {
+    const cleaned = cleanText(status);
+    if (!cleaned) return "";
+    if (/^sold$/i.test(cleaned)) return "";
+    return cleaned.replace(/\bfor sale\b/i, "").trim();
+  }
+
+  function normalizePersonName(value) {
+    const cleaned = cleanText(value);
+    if (!cleaned) return "";
+    if (/\b(road|street|avenue|drive|court|crescent|place|parade|terrace|lane|highway|boulevard)\b/i.test(cleaned)) return "";
+    return cleaned;
+  }
+
+  function hasSnapshotChanged(previous, current) {
+    const left = normalizeSnapshot(previous);
+    const right = normalizeSnapshot(current);
+    return describeSnapshotChanges(left, right).length > 0;
   }
 
   function normalizeMoneyText(value) {
@@ -945,20 +1057,7 @@
 
   function countMeaningfulChanges(snapshots) {
     if (!snapshots?.length) return 0;
-    let count = 0;
-    for (let index = 1; index < snapshots.length; index += 1) {
-      const previous = snapshots[index - 1];
-      const current = snapshots[index];
-      if (
-        previous.displayedPrice !== current.displayedPrice ||
-        previous.hiddenRange !== current.hiddenRange ||
-        previous.status !== current.status ||
-        previous.agent !== current.agent
-      ) {
-        count += 1;
-      }
-    }
-    return count;
+    return buildTimelineChanges(snapshots).length;
   }
 
   function daysBetween(start, end) {
