@@ -1,4 +1,6 @@
 (() => {
+  document.documentElement.dataset.houseLensContentScript = "loaded";
+
   const ROOT_ID = "house-lens-root";
   const STORE_KEY = "houseLensListings";
   const MAX_SCRIPT_CHARS = 450000;
@@ -476,6 +478,7 @@
     const root = document.createElement("section");
     root.id = ROOT_ID;
     root.innerHTML = renderPanel(listing, history);
+    setDebugPayload(root, { type: "listing", listing, history });
 
     const anchor = findPanelAnchor(listing);
     if (anchor?.parentElement) {
@@ -729,6 +732,7 @@
     const root = document.createElement("section");
     root.id = ROOT_ID;
     root.innerHTML = renderSearchPanel(results);
+    setDebugPayload(root, { type: "search", filters: results[0]?.searchFilters || parseSearchFilters(), results });
 
     const anchor = querySelectorSafe("h1") || querySelectorSafe("main") || document.body.firstElementChild;
     if (anchor?.parentElement) {
@@ -1077,6 +1081,14 @@
       return JSON.parse(value);
     } catch {
       return null;
+    }
+  }
+
+  function setDebugPayload(element, payload) {
+    try {
+      element.dataset.houseLensDebug = JSON.stringify(payload);
+    } catch {
+      element.dataset.houseLensDebug = JSON.stringify({ type: payload.type || "unknown" });
     }
   }
 
